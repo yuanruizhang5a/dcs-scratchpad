@@ -28,6 +28,12 @@ local function loadScratchpad()
     local isHidden = true
     local keyboardLocked = false
     local inMission = false
+    local togglePending = false
+    local refocusPending = false
+    local lastTabClock = -100
+    local selfRefocus = false
+    local unfocusPending = false
+    local suppressRefocus = false
 
     -- Pages State
     local currentPage = nil
@@ -542,7 +548,8 @@ local function loadScratchpad()
         local removeCommandEvents = function(commandEvents)
             for i, commandEvent in ipairs(commandEvents) do
                 for j = #keyboardEvents, 1, -1 do
-                    if keyboardEvents[j] == commandEvent then
+                    -- keep "`" locked: unlocking it lets plain "`" open chat
+                    if keyboardEvents[j] == commandEvent and commandEvent ~= 41 and commandEvent ~= "41" then
                         table.remove(keyboardEvents, j)
                         break
                     end
@@ -555,6 +562,14 @@ local function loadScratchpad()
         removeCommandEvents(Input.getUiLayerCommandKeyboardKeys(inputActions.iCommandFriendlyChat))
         removeCommandEvents(Input.getUiLayerCommandKeyboardKeys(inputActions.iCommandChatShowHide))
 
+        local backtickLocked = false
+        local names = {}
+        for _, k in ipairs(keyboardEvents) do
+            if k == "`" then backtickLocked = true end
+            if string.find(k, "`", 1, true) or string.find(string.lower(k), "grave", 1, true) then
+                table.insert(names, k)
+            end
+        end
         DCS.lockKeyboardInput(keyboardEvents)
         keyboardLocked = true
     end
@@ -915,14 +930,44 @@ local function loadScratchpad()
         textarea:addFocusCallback(
             function(self)
                 if self:getFocused() then
-                    lockKeyboardInput()
+                    if selfRefocus then
+                        selfRefocus = false
+                        lockKeyboardInput()
+                    elseif not isHidden and (os.clock() - lastTabClock) < 0.5 then
+                        -- Tab navigation focused the textarea: undo it.
+                        unfocusPending = true
+                    else
+                        lockKeyboardInput()
+                    end
+                elseif suppressRefocus then
+                    suppressRefocus = false
+                    blur()
+                elseif not isHidden
+                    and ((os.clock() - lastTabClock) < 0.5
+                        or ((dxgui.GetKeyboardButtonPressed("tab") or dxgui.GetKeyboardButtonPressed("`"))
+                            and not (dxgui.GetKeyboardButtonPressed("left ctrl") or dxgui.GetKeyboardButtonPressed("right ctrl"))
+                            and not (dxgui.GetKeyboardButtonPressed("left alt") or dxgui.GetKeyboardButtonPressed("right alt")))) then
+                    -- Tab / ` stole focus. Re-focus without blur(), which
+                    -- would unlock keyboard input mid-press (stuck key).
+                    -- Defer: setFocused inside a focus callback is unreliable.
+                    refocusPending = true
                 else
                     blur()
                 end
             end
         )
+        window:addKeyDownCallback(
+            function(self, keyName)
+                if keyName == "tab" then lastTabClock = os.clock() end
+            end
+        )
         textarea:addKeyDownCallback(
             function(self, keyName, unicode)
+                if keyName == "tab" then
+                    lastTabClock = os.clock()
+                else
+                    lastTabClock = -100
+                end
                 if keyName == "escape" then
                     blur()
                 end
@@ -1021,11 +1066,10 @@ local function loadScratchpad()
         window:addHotKeyCallback(
             config.hotkey,
             function()
-                if isHidden == true then
-                    show()
-                else
-                    hide()
-                end
+                -- Toggling while the keys are held makes hide() unlock the
+                -- keyboard mid-press, so the game misses the key-up and
+                -- treats the key as stuck. Defer until the keys are released.
+                togglePending = true
             end
         )
 
@@ -1093,7 +1137,46 @@ local function loadScratchpad()
     end
 
     local handler = {}
+    local function hotkeyReleased()
+        local Window = require('Window')
+        local parsed = Window.parseHotKey(config.hotkey)
+        if parsed and parsed.button and dxgui.GetKeyboardButtonPressed(string.lower(parsed.button)) then
+            return false
+        end
+        for _, name in ipairs({"left ctrl", "right ctrl", "left alt", "right alt", "left shift", "right shift"}) do
+            if dxgui.GetKeyboardButtonPressed(name) then
+                return false
+            end
+        end
+        return true
+    end
+
     function handler.onSimulationFrame()
+        if refocusPending then
+            refocusPending = false
+            if not isHidden and textarea and not textarea:getFocused() then
+                selfRefocus = true
+                textarea:setFocused(true)
+            end
+        end
+
+        if unfocusPending then
+            unfocusPending = false
+            if textarea and textarea:getFocused() and not keyboardLocked then
+                suppressRefocus = true
+                textarea:setFocused(false)
+            end
+        end
+
+        if togglePending and window and hotkeyReleased() then
+            togglePending = false
+            if isHidden == true then
+                show()
+            else
+                hide()
+            end
+        end
+
         if config == nil then
             loadConfiguration()
             loadPages()
