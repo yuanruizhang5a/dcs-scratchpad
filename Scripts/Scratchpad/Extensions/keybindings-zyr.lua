@@ -28,6 +28,7 @@ local keyBindings = {
     ["k"] = {action = "cursor_up"},
     ["h"] = {action = "cursor_left"},
     ["l"] = {action = "cursor_right"},
+    ["`"] = {action = "noop"}, -- never type a backtick
 }
 
 local dxgui = require("dxgui")
@@ -313,6 +314,12 @@ end
 
 
 local initialized = false
+-- Keys that must never take focus away from the focused Scratchpad.
+local guardedKeys = {["tab"] = true}
+local guardedKeyDown = nil
+local togglePending = false
+local performFocusToggle = nil
+local focusKeyNameForToggle = nil
 
 local function initialize()
     if initialized then
@@ -353,6 +360,12 @@ local function initialize()
     textarea:addKeyDownCallback(function(self, keyName)
         if isHidden() or not self:getFocused() or type(keyName) ~= "string" then
             return
+        end
+
+        local lowerName = string.lower(keyName)
+        if guardedKeys[lowerName] then
+            guardedKeyDown = lowerName
+            return true
         end
 
         local action = compiledBindings[currentBindingId(keyName)]
@@ -398,6 +411,11 @@ local function initialize()
     -- complete. This is intentionally idempotent because it starts from the
     -- captured pre-key state each time.
     textarea:addKeyUpCallback(function(self, keyName)
+        if guardedKeyDown and type(keyName) == "string"
+            and guardedKeyDown == string.lower(keyName) then
+            guardedKeyDown = nil
+            return true
+        end
         if pendingEdit
             and type(keyName) == "string"
             and pendingEdit.keyName == string.lower(keyName) then
@@ -414,11 +432,25 @@ local function initialize()
         end
     end)
 
+    local focusKeyName = string.lower(Window.parseHotKey(focusToggleHotkey).button)
+
+    -- The hotkey fires on key-down. Locking/unlocking game keyboard input
+    -- (done by Scratchpad on focus/blur) while the keys are still held makes
+    -- the game miss the key-up and treat the key as stuck. So only request the
+    -- toggle here and perform it after the keys are physically released.
     window:addHotKeyCallback(focusToggleHotkey, function()
         if not isHidden() then
-            textarea:setFocused(not textarea:getFocused())
+            togglePending = true
         end
     end)
+
+    performFocusToggle = function()
+        if isHidden() then
+            return
+        end
+        textarea:setFocused(not textarea:getFocused())
+    end
+    focusKeyNameForToggle = focusKeyName
 
     initialized = true
     logMessage("Initialized physical key bindings and focus hotkey " .. focusToggleHotkey)
@@ -434,6 +466,15 @@ local initializationFinished = false
 local initializer = {}
 
 function initializer.onSimulationFrame()
+    if togglePending and performFocusToggle then
+        if not dxgui.GetKeyboardButtonPressed(focusKeyNameForToggle)
+            and not modifierPressed("left ctrl", "right ctrl")
+            and not modifierPressed("left alt", "right alt") then
+            togglePending = false
+            performFocusToggle()
+        end
+    end
+
     if initializationFinished then
         return
     end
