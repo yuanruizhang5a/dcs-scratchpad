@@ -562,14 +562,6 @@ local function loadScratchpad()
         removeCommandEvents(Input.getUiLayerCommandKeyboardKeys(inputActions.iCommandFriendlyChat))
         removeCommandEvents(Input.getUiLayerCommandKeyboardKeys(inputActions.iCommandChatShowHide))
 
-        local backtickLocked = false
-        local names = {}
-        for _, k in ipairs(keyboardEvents) do
-            if k == "`" then backtickLocked = true end
-            if string.find(k, "`", 1, true) or string.find(string.lower(k), "grave", 1, true) then
-                table.insert(names, k)
-            end
-        end
         DCS.lockKeyboardInput(keyboardEvents)
         keyboardLocked = true
     end
